@@ -100,7 +100,11 @@ def list_volumes(backup_list, quiet=False):
         if quiet:
             print(ts)
         else:
-            print(ts, volume_uuids)
+            print(ts,
+                time.strftime("%c %Z", time.localtime(ts)),
+                volume_uuids
+            )
+
 
 
 def is_error_cs_result(res):
