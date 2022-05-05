@@ -103,6 +103,12 @@ def list_volumes(backup_list, quiet=False):
             print(ts, volume_uuids)
 
 
+def is_error_cs_result(res):
+    if "errorcode" in res:
+        logging.error("Error executing CS command: %s", res["errortext"])
+        sys.exit(1)
+
+
 def revert_vm(backup: Dict[str, Any]) -> None:
     """
     Restores a VM from a backup
@@ -120,6 +126,7 @@ def revert_vm(backup: Dict[str, Any]) -> None:
     logging.debug("Getting volume list for VM UUID %s", vm_uuid)
     # get volumes uuid and sp GID
     res = cs_api.listVolumes(virtualmachineid=vm_uuid)
+    is_error_cs_result(res)
 
     # make sure all volumes are in the backup
     volume_list = res["volume"]
@@ -140,7 +147,9 @@ def revert_vm(backup: Dict[str, Any]) -> None:
     # Stop the VM
     logging.info("Stopping VM %s", vm_uuid)
     jobid = cs_api.stopVirtualMachine(id=vm_uuid, forced=True)["jobid"]
-    vm = wait_job(jobid, timeout=30)["virtualmachine"]
+    res = wait_job(jobid, timeout=30)
+    is_error_cs_result(res)
+    vm = res["virtualmachine"]
     assert vm["state"] == "Stopped"
     logging.debug("VM %s is stopped", vm_uuid)
 
@@ -197,6 +206,7 @@ def revert_vm(backup: Dict[str, Any]) -> None:
 
     logging.info("Revert completed")
 
+
 def create_volume_and_attach(
         volume_uuid: str,
         backup: Dict[str, Any],
@@ -217,6 +227,7 @@ def create_volume_and_attach(
     fix_map(snapshot_map)
 
     res = cs_api.listVolumes(id=volume_uuid)
+    is_error_cs_result(res)
     volume = res["volume"][0]
     volume_size = int(volume["size"] / 2**30)  # in GiB
 
@@ -234,6 +245,7 @@ def create_volume_and_attach(
         name = f"Restore of {volume_uuid}"
     )["jobid"]
     res = wait_job(jobid)
+    is_error_cs_result(res)
     new_cs_volume = res["volume"]
     assert new_cs_volume["state"] == "Allocated"
     new_volume_uuid = new_cs_volume["id"]
@@ -245,12 +257,20 @@ def create_volume_and_attach(
     logging.debug("Attach and detach the new volume")
     jobid = cs_api.attachVolume(id=new_volume_uuid, virtualmachineid=server)["jobid"]
     res = wait_job(jobid)
+    is_error_cs_result(res)
     assert res["volume"]["state"] == "Ready"
 
     jobid = cs_api.detachVolume(id=new_volume_uuid)["jobid"]
     res = wait_job(jobid)
+    is_error_cs_result(res)
     new_cs_volume = res["volume"]
     assert new_cs_volume["state"] == "Ready"
+
+    # Fix. ACS 4.16 doesn't update the path on attach/detach.
+    res = cs_api.listVolumes(id=new_volume_uuid)
+    is_error_cs_result(res)
+    new_cs_volume = res["volume"][0]
+
     sp_volume_gid = new_cs_volume["path"].split("/")[-1]
     sp_volume_name = f"~{sp_volume_gid}"
 
