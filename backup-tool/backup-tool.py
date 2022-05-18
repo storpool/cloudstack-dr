@@ -239,12 +239,26 @@ def create_volume_and_attach(
     snapshot_gid = snapshot_name.lstrip("~")
 
     #
+    # Get VM's account, domain ID, zone ID
+    # We'll need this to create the volume in the same domain, account, zone
+    #
+
+    res = cs_api.listVirtualMachines(id=server)
+    vm = res["virtualmachine"][0]
+    assert "account" in vm, "Can't get VM's account"
+    assert "domainid" in vm, "Can't get VM's domainId"
+    assert "zoneid" in vm, "Can't get VM's zoneId"
+
+
+    #
     # create a new cs volume
     #
     logging.info("Create a new volume")
     jobid = cs_api.createVolume(
+        account = vm["account"],
+        domainid = vm["domainid"],
         diskofferingid = config["CS_BACKUP_DISKOFFERING_ID"],
-        zoneid = config["CS_ZONE_ID"],
+        zoneid = vm["zoneid"],
         size = volume_size,
         name = f"Restore of {volume_uuid}"
     )["jobid"]
