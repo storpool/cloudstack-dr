@@ -254,6 +254,8 @@ def create_volume_and_attach(
     # create a new cs volume
     #
     logging.info("Create a new volume")
+    logging.debug("Creating the new volume in domain ID %s", vm["domainid"])
+    logging.debug("Creating the new voluem with account %s", vm["account"])
     jobid = cs_api.createVolume(
         account = vm["account"],
         domainid = vm["domainid"],
