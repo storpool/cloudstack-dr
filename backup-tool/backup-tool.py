@@ -129,7 +129,7 @@ def revert_vm(backup: Dict[str, Any]) -> None:
 
     logging.debug("Getting volume list for VM UUID %s", vm_uuid)
     # get volumes uuid and sp GID
-    res = cs_api.listVolumes(virtualmachineid=vm_uuid)
+    res = cs_api.listVolumes(virtualmachineid=vm_uuid, listall=True)
     is_error_cs_result(res)
 
     # make sure all volumes are in the backup
