@@ -50,7 +50,7 @@ def get_backup_list(vm: str) -> Dict[int, Dict[str, Any]]:
         ] + cmd
 
     process = subprocess.run(
-        cmd, capture_output=True, check=True, encoding="utf_8"
+        cmd, stdout=subprocess.PIPE, check=True, encoding="utf_8"
     )
     res = json.loads(process.stdout)
 
