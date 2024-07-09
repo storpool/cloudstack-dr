@@ -230,13 +230,28 @@ def create_volume_and_attach(
     snapshot_map: Dict[str, str] = backup["extra_info"]["sp"]["map"]
     fix_map(snapshot_map)
 
-    res = cs_api.listVolumes(id=volume_uuid)
-    is_error_cs_result(res)
-    volume = res["volume"][0]
-    volume_size = int(volume["size"] / 2**30)  # in GiB
-
     snapshot_name = snapshot_map[volume_uuid]
     snapshot_gid = snapshot_name.lstrip("~")
+
+    #
+    # copy the snapshot to the local cluster
+    #
+    logging.debug("Copy snapshot %s to the local cluster", snapshot_gid)
+    args = {
+        "remoteId": snapshot_gid,
+        "remoteLocation": config["SP_BACKUP_LOCATION_NAME"],
+        "template": config["SP_LOCAL_TEMPLATE"],
+    }
+    try:
+        res = sp_api.snapshotFromRemote(args)
+    except spapi.ApiError as err:
+        # A local copy of the snapshot may already be created. This is OK.
+        if err.name != "objectExists":
+            raise
+
+    snapshot_size = sp_api.snapshotDescribe(snapshot_name).size
+    volume_size = int(snapshot_size / 2**30)
+    logging.debug("Getting the size of the snapshot for the new volume %s", volume_size)
 
     #
     # Get VM's account, domain ID, zone ID
@@ -293,22 +308,6 @@ def create_volume_and_attach(
 
     sp_volume_gid = new_cs_volume["path"].split("/")[-1]
     sp_volume_name = f"~{sp_volume_gid}"
-
-    #
-    # copy the snapshot to the local cluster
-    #
-    logging.debug("Copy snapshot %s to the local cluster", snapshot_gid)
-    args = {
-        "remoteId": snapshot_gid,
-        "remoteLocation": config["SP_BACKUP_LOCATION_NAME"],
-        "template": config["SP_LOCAL_TEMPLATE"],
-    }
-    try:
-        res = sp_api.snapshotFromRemote(args)
-    except spapi.ApiError as err:
-        # A local copy of the snapshot may already be created. This is OK.
-        if err.name != "objectExists":
-            raise
 
     #
     # revert the newly created SP volume to the snapshot
