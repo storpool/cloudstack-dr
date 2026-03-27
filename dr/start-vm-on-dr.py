@@ -16,6 +16,9 @@ import confget
 # pip install cs
 import cs
 
+COPY_TAGS = [
+    "qc",
+]
 
 config: confget.Config = None  # Config is in /etc/storpool/dr.conf
 cs_api: cs.CloudStack = None
@@ -65,6 +68,14 @@ def get_vc_policy(vm_uuid: str) -> str:
         logging.debug("vc-policy tag found for VM %s: %s", vm_uuid, value)
         return value
     return None
+
+
+def get_snapshot_tags() -> Dict[str, Dict[str, str]]:
+    snapshot_list = sp_api.SnapshotsList()
+    return {
+        snapshot["name"]: snapshot["tags"]
+        for snapshot in snapshot_list
+    }
 
 
 def get_backup_list() -> Dict[int, Any]:
@@ -140,17 +151,17 @@ def check_all_volumes(
 
 
 def create_volume(snapshot: str, vm_uuid: str, vol_uuid: str, vc_policy: str,
-                  noop=False) -> str:
+                  tags:dict = {}, noop=False) -> str:
     logging.debug("Create a new volume from snapshot %s", snapshot)
     if noop:
         return "NNN.N.NNN"
     else:
-        tags = {
+        tags.update({
             "cs": "volume",
             "cvm": vm_uuid,
             "uuid": vol_uuid,
             "vc_policy": vc_policy,
-        }
+        })
         res = sp_api.volumeCreate({
             "parent": snapshot,
             "tags": tags,
@@ -192,7 +203,7 @@ def start_vm(vm_uuid: str, noop=False, async_=False) -> None:
                  res.get("state"), res.get("hostname"))
 
 
-def activate_vm(vm_uuid:str, backup_list, noop=False, async_=False) -> None:
+def activate_vm(vm_uuid:str, backup_list, snapshot_tags, noop=False, async_=False) -> None:
     # get the list of all volumes attached to the VM
     volumes = get_volumes(vm_uuid)
 
@@ -215,11 +226,18 @@ def activate_vm(vm_uuid:str, backup_list, noop=False, async_=False) -> None:
         return
 
     for volume, snapshot in snapshot_map.items():
+        tags = {
+            k: v
+            for k,v  in snapshot_tags.get(snapshot, {}).items()
+            if k in COPY_TAGS
+        }
+
         vol_gid = create_volume(
             snapshot,
             vm_uuid=vm_uuid,
             vol_uuid=volume,
             vc_policy=vc_policy,
+            tags=tags,
             noop=noop
         )
         update_path(volume, vol_gid, noop=noop)
@@ -248,9 +266,10 @@ def main():
     get_apis()
 
     backup_list = get_backup_list()
+    snapshot_tags = get_snapshot_tags()
     job_list = []
     for vm_uuid in args.vm:
-        jobid = activate_vm(vm_uuid, backup_list, noop=args.noop,
+        jobid = activate_vm(vm_uuid, backup_list, snapshot_tags, noop=args.noop,
             async_=args.async_)
         if args.async_:
             job_list.append(jobid)
