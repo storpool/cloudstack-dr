@@ -62,7 +62,7 @@ def get_vc_policy(vm_uuid: str) -> str:
         resourceid=vm_uuid,
         key="vc-policy"
     )
-    tag_list = res["tag"]
+    tag_list = res.get("tag")
     if tag_list:
         value = tag_list[0]["value"]
         logging.debug("vc-policy tag found for VM %s: %s", vm_uuid, value)
@@ -71,9 +71,9 @@ def get_vc_policy(vm_uuid: str) -> str:
 
 
 def get_snapshot_tags() -> Dict[str, Dict[str, str]]:
-    snapshot_list = sp_api.SnapshotsList()
+    snapshot_list = sp_api.snapshotsList()
     return {
-        snapshot["name"]: snapshot["tags"]
+        snapshot.name: snapshot.tags
         for snapshot in snapshot_list
     }
 
