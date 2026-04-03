@@ -52,6 +52,8 @@ Copy `dr.conf` to `/etc/storpool/dr.conf`
 Notes:
  - the StorPool API is the API at the DR site.
  - `VC_SSH_HOST` is the host at the DR site with volumecare installed.
+ - `COPY_TAGS` is used in combination with the `inherit_tags` configuration
+ in Volumecare, to apply additional tags to recreated volumes
 
 The configuration file `cloudstack.ini` must be stored in the current directory from which
 the `start-vm-on-dr.py` is started or as `.cloudstack.ini` in the user's home directory.

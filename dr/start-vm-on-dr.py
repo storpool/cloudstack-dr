@@ -16,7 +16,7 @@ import confget
 # pip install cs
 import cs
 
-COPY_TAGS = [
+COPY_TAGS_DEFAULT = [
     "qc",
 ]
 
@@ -27,9 +27,12 @@ sp_api: spapi.Api = None
 
 def read_config():
     global config
-    config = confget.read_ini_file(confget.Config(
+    cfg_raw = confget.read_ini_file(confget.Config(
         [], filename="/etc/storpool/dr.conf"
     ))[""]
+    copy_tags_cfg = cfg_raw.get("COPY_TAGS", "").split(',')
+    tag_list = list(set(copy_tags_cfg + COPY_TAGS_DEFAULT))
+    config = { **cfg_raw, "COPY_TAGS": tag_list }
 
 
 def get_apis():
@@ -229,7 +232,7 @@ def activate_vm(vm_uuid:str, backup_list, snapshot_tags, noop=False, async_=Fals
         tags = {
             k: v
             for k,v  in snapshot_tags.get(snapshot, {}).items()
-            if k in COPY_TAGS
+            if k in config["COPY_TAGS"]
         }
 
         vol_gid = create_volume(
