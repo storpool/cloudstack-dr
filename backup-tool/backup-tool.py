@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # pip install cs
 import cs
@@ -350,6 +350,200 @@ def check_backup_is_uuid_format(backup_list) -> None:
                 )
 
 
+def restore_vm(
+        backup: Dict[str, Any],
+        new_vm_uuid: str,
+        root_uuid: Optional[str],
+) -> None:
+
+    """
+    Restore the content of a backup onto an existing, different VM.
+
+    This is used to recover a VM whose original has been deleted (or is
+    otherwise unavailable) by replaying its backup onto a freshly
+    provisioned replacement VM.
+
+    The target VM (``new_vm_uuid``) must already exist and must have the
+    same number of volumes as the backup. The target VM's ROOT volume is
+    restored from the source VM's ROOT snapshot; the remaining DATADISKs
+    are paired with the backup's remaining snapshots in arbitrary order
+    (the operator is expected to treat data disks as interchangeable).
+
+    Volume sizes on the target VM do not need to match the backup: the
+    StorPool ``volumeRevert`` operation resizes each target volume to
+    match its snapshot.
+
+    The target VM is stopped (force) before the revert and is left in the
+    ``Stopped`` state when this function returns, so that the operator
+    can inspect it before starting.
+
+    :param backup: backup item, as returned by :func:`get_backup_list`.
+    :param new_vm_uuid: UUID of the target VM that will receive the
+        restored content.
+    :param root_uuid: UUID of the ROOT volume of the *source* VM (the one
+        the backup was taken from). Required when the source VM had more
+        than one volume, so the ROOT snapshot can be identified. May be
+        ``None`` when the backup contains a single volume.
+    :raises RuntimeError: if ``root_uuid`` is required but missing or
+        unknown, or if the target VM's volume count does not match the
+        backup, or if the target VM does not have exactly one ROOT
+        volume.
+    :return: None
+    """
+
+    snapshot_map: Dict[str, str] = backup["extra_info"]["sp"]["map"]
+    fix_map(snapshot_map)
+
+    original_volume_uuids = list(snapshot_map.keys())
+
+    #
+    # Figure out which of the source's volumes is the ROOT.
+    # If the source VM had only one volume, the ROOT is unambiguous.
+    #
+    if len(original_volume_uuids) == 1:
+        source_root_uuid = original_volume_uuids[0]
+        if root_uuid is not None and root_uuid != source_root_uuid:
+            raise RuntimeError(
+                f"Specified root UUID {root_uuid} does not match the only "
+                f"volume in the backup ({source_root_uuid})"
+            )
+    else:
+        if root_uuid is None:
+            raise RuntimeError(
+                "Source VM had multiple volumes; the UUID of the original "
+                "ROOT volume must be specified"
+            )
+        if root_uuid not in snapshot_map:
+            raise RuntimeError(
+                f"Root UUID {root_uuid} not found in the backup"
+            )
+        source_root_uuid = root_uuid
+
+    logging.info("Restoring backup %s to VM %s",
+        backup["create_ts"], new_vm_uuid)
+
+    #
+    # Get the target VM's volumes and match them to the backup's snapshots.
+    #
+    logging.debug("Getting volume list for target VM UUID %s", new_vm_uuid)
+    res = cs_api.listVolumes(virtualmachineid=new_vm_uuid, listall=True)
+    is_error_cs_result(res)
+    target_volumes = res["volume"]
+
+    if len(target_volumes) != len(original_volume_uuids):
+        raise RuntimeError(
+            f"Target VM has {len(target_volumes)} volume(s), but backup "
+            f"has {len(original_volume_uuids)} volume(s)"
+        )
+
+    target_roots = [v for v in target_volumes if v["type"] == "ROOT"]
+    target_datadisks = [v for v in target_volumes if v["type"] == "DATADISK"]
+
+    if len(target_roots) != 1:
+        raise RuntimeError(
+            f"Target VM must have exactly one ROOT volume, "
+            f"found {len(target_roots)}"
+        )
+    target_root = target_roots[0]
+
+    source_datadisk_uuids = [
+        u for u in original_volume_uuids if u != source_root_uuid
+    ]
+
+    if len(source_datadisk_uuids) != len(target_datadisks):
+        raise RuntimeError(
+            f"Target VM has {len(target_datadisks)} DATADISK(s), but "
+            f"backup has {len(source_datadisk_uuids)} DATADISK(s)"
+        )
+
+    def annotate(vol: Dict[str, Any], source_uuid: str) -> None:
+        vol["sp_source_uuid"] = source_uuid
+        vol["sp_snapshot"] = snapshot_map[source_uuid]
+        sp_gid = vol["path"].split("/")[-1]
+        vol["sp_volume_name"] = "~" + sp_gid
+
+    annotate(target_root, source_root_uuid)
+
+    #
+    # Pair target DATADISKs with source DATADISK snapshots in arbitrary
+    # order. There is no mapping preserved in the backup and the order
+    # doesn't matter: volumeRevert will adjust the target volume's size
+    # to match the snapshot.
+    #
+    for target_vol, source_uuid in zip(target_datadisks, source_datadisk_uuids):
+        annotate(target_vol, source_uuid)
+
+    volume_list = [target_root] + target_datadisks
+
+    logging.debug(
+        "Matched %d volume(s) on VM %s: %s",
+        len(volume_list),
+        new_vm_uuid,
+        repr([
+            (v["id"], v["sp_volume_name"], v["sp_source_uuid"])
+            for v in volume_list
+        ])
+    )
+
+    # Stop the target VM
+    logging.info("Stopping VM %s", new_vm_uuid)
+    jobid = cs_api.stopVirtualMachine(id=new_vm_uuid, forced=True)["jobid"]
+    res = wait_job(jobid, timeout=30)
+    is_error_cs_result(res)
+    vm = res["virtualmachine"]
+    assert vm["state"] == "Stopped"
+    logging.debug("VM %s is stopped", new_vm_uuid)
+
+    # Detach all volumes on the StorPool side. May not be needed, but to ensure
+    logging.debug(
+        "Detaching volumes: %s",
+        [v["sp_volume_name"] for v in volume_list]
+    )
+    args = {
+        "reassign": [
+            {
+                "volume": vol["sp_volume_name"],
+                "detach": "all",
+            }
+            for vol in volume_list
+        ],
+    }
+    sp_api.volumesReassignWait(args)
+
+    # Copy snapshots to the local cluster
+    logging.debug("Copy snapshots to the local cluster")
+    for vol in volume_list:
+        snapshot_name = vol["sp_snapshot"]
+        snapshot_gid = snapshot_name.lstrip("~")
+        args = {
+            "remoteId": snapshot_gid,
+            "remoteLocation": config["SP_BACKUP_LOCATION_NAME"],
+            "template": config["SP_LOCAL_TEMPLATE"],
+        }
+        try:
+            sp_api.snapshotFromRemote(args)
+        except spapi.ApiError as err:
+            # A local copy of the snapshot may already be created. This is OK.
+            if err.name != "objectExists":
+                raise
+
+    # Revert target volumes using the local snapshots
+    logging.debug("Revert volumes using local snapshots")
+    for vol in volume_list:
+        volume_name = vol["sp_volume_name"]
+        snapshot_name = vol["sp_snapshot"]
+        logging.debug("Revert volume %s to snapshot %s",
+            volume_name, snapshot_name)
+        sp_api.volumeRevert(volume_name, {"toSnapshot": snapshot_name,
+                                          "revertSize": True})
+
+    # Delete snapshots on the local cluster
+    logging.debug("Delete snapshots on the local cluster")
+    for vol in volume_list:
+        sp_api.snapshotDelete(vol["sp_snapshot"])
+
+    logging.info("Restore completed")
+
 
 def main():
 
@@ -357,6 +551,7 @@ def main():
     list <vm_uuid>
     revert <vm_uuid> <backup_id>
     attach <vm_uuid> <backup_id> <volume_uuid> <server_uuid>
+    restore <vm_uuid> <backup_id> <new_vm_uuid> [<old_root_uuid>]
     """
 
     parser = argparse.ArgumentParser()
@@ -370,11 +565,11 @@ def main():
     )
     list_cmd.add_argument("vm_uuid", help="UUID of the VM")
 
-    restore_cmd = subparsers.add_parser("revert",
+    revert_cmd = subparsers.add_parser("revert",
         help="Revert all disks of a VM. Leaves the VM in a STOPPED state"
     )
-    restore_cmd.add_argument("vm_uuid", help="UUID of the VM to be reverted")
-    restore_cmd.add_argument("backup_id", type=int,
+    revert_cmd.add_argument("vm_uuid", help="UUID of the VM to be reverted")
+    revert_cmd.add_argument("backup_id", type=int,
         help="ID of the backup to be restored")
 
 
@@ -390,6 +585,27 @@ def main():
         "server_uuid",
         help="UUID of the backup server, where the restored volume will be attached."
     )
+
+    restore_cmd = subparsers.add_parser("restore",
+        help="Restore a backup onto a different, already-provisioned VM. "
+            "Typically used to recover a deleted or unrecoverable VM by "
+            "replaying its backup onto a replacement VM. The target VM "
+            "must have the same number of volumes as the backup; volume "
+            "sizes do not need to match (they will be adjusted by the "
+            "revert). The target VM is left in the STOPPED state."
+    )
+    restore_cmd.add_argument("vm_uuid",
+        help="UUID of the original (source) VM the backup was taken from.")
+    restore_cmd.add_argument("backup_id", type=int,
+        help="ID of the backup to be restored")
+    restore_cmd.add_argument("new_vm_uuid",
+        help="UUID of the target VM that will receive the restored content. "
+            "It must already exist and have the same number of volumes as "
+            "the source VM.")
+    restore_cmd.add_argument("root_uuid", nargs="?",
+        help="UUID of the source VM's ROOT volume, used to identify the "
+            "ROOT snapshot in the backup. Required when the source VM had "
+            "more than one volume; optional if it had only one.")
 
     args = parser.parse_args()
     if args.command is None:
@@ -432,6 +648,18 @@ def main():
             sys.exit(1)
         create_volume_and_attach(args.volume_uuid, backup, args.server_uuid)
         return 0
+
+    if args.command == "restore":
+        backup_list = get_backup_list(args.vm_uuid)
+        try:
+            backup = backup_list[args.backup_id]
+        except KeyError:
+            logging.error("Backup ID %s not found for VM %s",
+                          args.backup_id, args.vm_uuid)
+            sys.exit(1)
+        restore_vm(backup, args.new_vm_uuid, args.root_uuid)
+        return 0
+
 
     sys.exit("unknown command")
 
