@@ -109,22 +109,64 @@ def get_vm_cluster_name(vm_uuid: str) -> Optional[str]:
         )
         return None
 
+    cluster_ids = set()
     for vol in volumes:
-        sp_gid = vol["path"].split("/")[-1]
-        cluster_id = get_cluster_for_sp_volume("~" + sp_gid)
+        # A volume may not have a StorPool path yet (e.g. Allocated state);
+        # skip those and rely on the remaining volumes.
+        path = vol.get("path")
+        if not path:
+            continue
+        cluster_id = get_cluster_for_sp_volume("~" + path.split("/")[-1])
         if cluster_id:
-            return cluster_id
+            cluster_ids.add(cluster_id)
 
-    logging.warning(
-        "Could not determine the StorPool cluster for VM %s from its volumes; "
-        "using the default StorPool cluster", vm_uuid
-    )
-    return None
+    if not cluster_ids:
+        logging.warning(
+            "Could not determine the StorPool cluster for VM %s from its "
+            "volumes; using the default StorPool cluster", vm_uuid
+        )
+        return None
+
+    if len(cluster_ids) > 1:
+        raise RuntimeError(
+            f"VM {vm_uuid} has volumes on multiple StorPool clusters "
+            f"({', '.join(sorted(cluster_ids))}); this is not supported"
+        )
+
+    return next(iter(cluster_ids))
 
 
-def get_backup_cluster_id(vm_uuid: str) -> str:
-    cluster_name = get_vm_cluster_name(vm_uuid) if is_multicluster() else None
-    return get_cluster_config(cluster_name)["SP_BACKUP_CLUSTER_ID"]
+def all_configured_backup_cluster_ids() -> set:
+    """Return every SP_BACKUP_CLUSTER_ID known from the config.
+
+    This is the global value plus any per-subcluster ``[cluster <id>]``
+    override. Used as a fallback when the VM's own subcluster cannot be
+    resolved.
+    """
+    ids = set()
+    global_id = config.get("SP_BACKUP_CLUSTER_ID")
+    if global_id:
+        ids.add(global_id)
+    for section, settings in config_all.items():
+        if section.startswith("cluster ") and settings.get("SP_BACKUP_CLUSTER_ID"):
+            ids.add(settings["SP_BACKUP_CLUSTER_ID"])
+    return ids
+
+
+def get_backup_cluster_ids(vm_uuid: str) -> set:
+    """Return the set of StorPool backup-location IDs to accept for a VM.
+
+    Prefer the backup location configured for the VM's own subcluster. When
+    that subcluster cannot be determined -- e.g. the source VM has already
+    been deleted, which is the typical ``restore`` case -- fall back to every
+    backup location known from the config so the backups are still found.
+    """
+    if is_multicluster():
+        cluster_name = get_vm_cluster_name(vm_uuid)
+        if cluster_name:
+            return {get_cluster_config(cluster_name)["SP_BACKUP_CLUSTER_ID"]}
+        return all_configured_backup_cluster_ids()
+    return {config["SP_BACKUP_CLUSTER_ID"]}
 
 
 def get_apis():
@@ -176,11 +218,11 @@ def get_backup_list(vm: str) -> Dict[int, Dict[str, Any]]:
         ):
             logging.debug("backups found for VM %s", vm)
             history = bck["history"]
-            backup_cluster_id = get_backup_cluster_id(vm)
+            backup_cluster_ids = get_backup_cluster_ids(vm)
             return {
                 entry["create_ts"]: entry
                 for entry in history
-                if entry["id"]["location"] == backup_cluster_id
+                if entry["id"]["location"] in backup_cluster_ids
             }
 
     # no backups found
@@ -528,8 +570,8 @@ def restore_vm(
     can inspect it before starting.
 
     In a StorPool multicluster deployment the restore runs against the
-    StorPool subcluster where the target VM's volumes reside (resolved
-    from the CloudStack ``sp.cluster.id`` cluster setting). The target VM
+    StorPool subcluster where the target VM's volumes reside (resolved from
+    the StorPool volume info, ``VolumeSummary.clusterId``). The target VM
     may therefore live in a different CloudStack zone or cluster than
     the source VM whose backup is being replayed.
 
