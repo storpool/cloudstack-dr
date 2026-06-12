@@ -19,6 +19,7 @@ Usage
  - list the available backups,
  - revert a VM to a previous state
  - create a new volume from a backup, and attach it to another VM
+ - restore a backup onto a different, already-provisioned VM
 
 List available backups
 -----------------------
@@ -137,6 +138,31 @@ INFO:root:Volume attached
 DEBUG:root:Delete snapshot ~bgu4.b.nq7
 ```
 
+Restore a backup onto a replacement VM
+---------------------------------------
+
+This replays a VolumeCare backup onto an existing VM that was provisioned to
+replace a deleted or unrecoverable source VM. The target VM must already
+exist and must have the same number of volumes as the backup. Volume sizes
+do not need to match; they are adjusted during the revert. The target VM is
+left in the ``Stopped`` state.
+
+```commandline
+backup-tool.py [-v] restore <source_vm_uuid> <backup_id> <new_vm_uuid> [<old_root_uuid>]
+```
+
+where
+
+ - ``<source_vm_uuid>`` is the UUID of the original VM the backup was taken from
+ - ``<backup_id>`` is the timestamp returned by ``backup-tool.py list``
+ - ``<new_vm_uuid>`` is the UUID of the replacement VM that will receive the data
+ - ``<old_root_uuid>`` is the ROOT volume UUID of the source VM; required when
+   the backup contains more than one volume
+
+In a StorPool multicluster deployment the restore runs on the StorPool
+subcluster where the target VM's volumes live. The source and target VMs may
+be in different CloudStack zones.
+
 All commands support `-v` or `-vv` to show debug information.
 
 Installation
@@ -165,6 +191,30 @@ Configuration
 ---------------
 
 Edit settings in `backup-tool.conf` and copy it to `/etc/storpool/`.
+
+For StorPool multicluster deployments (multiple CloudStack availability zones
+backed by different StorPool subclusters), set ``SP_MULTICLUSTER = 1`` in
+``backup-tool.conf``.
+
+The subcluster a VM is on is detected automatically from the StorPool volume
+info of the VM's volumes (the ``clusterId`` field of the multicluster volume
+listing). This works regardless of the VM's power state or host placement, so
+it is reliable for Stopped or freshly-provisioned replacement VMs. No
+``sp.cluster.id`` lookup in CloudStack is required.
+
+Each StorPool operation is then forwarded to that subcluster using StorPool's
+``RemoteCommand``, addressing the cluster by ID with the ``~<clusterID>`` form
+(e.g. ``RemoteCommand/~nmjc.b/...``). No registered StorPool cluster name is
+required.
+
+Optional ``[cluster <clusterID>]`` sections (e.g. ``[cluster nmjc.b]``,
+without the ``~`` prefix, matching the StorPool ``clusterId``) override
+``SP_BACKUP_CLUSTER_ID``, ``SP_BACKUP_LOCATION_NAME``, and ``SP_LOCAL_TEMPLATE``
+per subcluster.
+
+When VolumeCare uses two subclusters of the same StorPool multicluster as
+primary and backup locations, enable ``use_cluster_id=1`` in VolumeCare on
+both clusters (see the StorPool VolumeCare documentation).
 
 Edit Cloudstack API credentials in `cloudstack.ini`. `cloudstack.ini` shall be
 in saved the directory from where the `backup-tool.py` scripts is executed,
