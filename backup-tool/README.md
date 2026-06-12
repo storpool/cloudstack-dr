@@ -19,6 +19,7 @@ Usage
  - list the available backups,
  - revert a VM to a previous state
  - create a new volume from a backup, and attach it to another VM
+ - restore a backup onto a different, already-provisioned VM. Typically used to recover a deleted VM
 
 List available backups
 -----------------------
@@ -136,6 +137,37 @@ DEBUG:root:Attach volume ac3e0396-3579-433b-b978-72319f4c27a6 to VM a5aa538f-6f6
 INFO:root:Volume attached
 DEBUG:root:Delete snapshot ~bgu4.b.nq7
 ```
+
+Restore into a different VM
+---------------------------
+
+This function can be used to restore a backup into a VM different from the
+original VM. The main use case is restoring a deleted VM. In this case, the
+user has to manually recreate the deleted VM, by provisioning a new VM with a
+similar configuration - service offering, networks, owner, etc. Critical part
+is the restored VM has the same number of disks as the selected backup. The
+content of the provisioned disks is discarded, so they may be created for the
+original template or empty images. The size of the provisioned disks is also
+not important, but for reporting and accounting purposes it is recommended to
+provision the disks with the original size.
+
+Once the VM is provisioned, it can be restored with the command:
+
+```commandline
+
+backup-tool.py restore [-h] vm_uuid backup_id new_vm_uuid [root_uuid]
+```
+
+where
+  - vm_uuid is the UUID of the original (source) VM the backup was taken from.
+  - backup_id is the ID of the backup to be restored
+  - new_vm_uuid is the UUID of the target VM that will receive the restored
+  content. It must already exist and have the same number of volumes as the
+  source VM.
+  - root_uuid is the UUID of the source VM's ROOT volume, used to identify the
+  ROOT snapshot in the backup. Required when the source VM had more than one
+  volume; optional if it had only one.
+
 
 All commands support `-v` or `-vv` to show debug information.
 
