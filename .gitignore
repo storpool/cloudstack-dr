@@ -1,0 +1,6 @@
+# local scratch: vendored StorPool bindings copy used for inspection
+/storpool/
+# local scratch: live API reference dumps
+/backup-tool/storpool-*.json
+.venv/
+__pycache__/
