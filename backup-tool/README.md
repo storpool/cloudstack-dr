@@ -187,6 +187,19 @@ pip install storpool
 pip install cs
 ```
 
+Tests
+-------------
+
+`test_backup_tool.py` unit-tests the tool's logic with all StorPool and
+CloudStack API calls mocked, so it can run anywhere. It uses the real
+`storpool`/`cs`/`confget` modules when they are installed and falls back to
+stubs otherwise:
+
+```commandline
+python3 -m venv .venv && .venv/bin/pip install storpool cs confget
+.venv/bin/python backup-tool/test_backup_tool.py
+```
+
 Configuration
 ---------------
 
