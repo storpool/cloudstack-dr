@@ -195,26 +195,58 @@ def all_configured_backup_cluster_ids() -> set:
     return ids
 
 
-def get_backup_cluster_ids(vm_uuid: str, accept_all: bool = False) -> set:
-    """Return the set of StorPool backup-location IDs to accept for a VM.
+def backup_location_name_for(
+        backup_location_id: Optional[str],
+        cluster_settings: Dict[str, Any],
+) -> str:
+    """Resolve the StorPool location NAME to pull a backup snapshot from.
 
-    Prefer the backup location configured for the VM's own subcluster. When
-    that subcluster cannot be determined -- e.g. the source VM has already
-    been deleted, which is the typical ``restore`` case -- fall back to every
-    backup location known from the config so the backups are still found.
+    ``backup_location_id`` is the backup entry's ``id.location`` -- the
+    backup location the snapshot was actually written to (the value matched
+    against ``SP_BACKUP_CLUSTER_ID`` when listing backups). Find the config
+    entry -- the global settings or a ``[cluster ...]`` section -- whose
+    ``SP_BACKUP_CLUSTER_ID`` equals it and return that entry's
+    ``SP_BACKUP_LOCATION_NAME``, so a cross-subcluster restore names the
+    location the backup lives at, not the target subcluster's own backup
+    location.
 
-    ``accept_all`` forces the union of every configured backup location. This
-    is used by the ``restore`` command, whose source VM may be deleted,
-    migrated, or live on a different subcluster than where its backup was
-    written -- so constraining to the source VM's current subcluster could
-    hide an otherwise-valid backup.
+    Falls back to the target cluster's configured ``SP_BACKUP_LOCATION_NAME``
+    (with a warning when a lookup was attempted but found no match).
+    """
+    default_name = cluster_settings["SP_BACKUP_LOCATION_NAME"]
+    if not is_multicluster() or not backup_location_id:
+        return default_name
+    if cluster_settings.get("SP_BACKUP_CLUSTER_ID") == backup_location_id:
+        return default_name
+    if config.get("SP_BACKUP_CLUSTER_ID") == backup_location_id:
+        return config["SP_BACKUP_LOCATION_NAME"]
+    for section, settings in config_all.items():
+        if not section.startswith("cluster "):
+            continue
+        merged = dict(config)
+        merged.update(settings)
+        if merged.get("SP_BACKUP_CLUSTER_ID") == backup_location_id:
+            return merged["SP_BACKUP_LOCATION_NAME"]
+    logging.warning(
+        "No configured backup location matches the backup's location %s; "
+        "falling back to %s", backup_location_id, default_name
+    )
+    return default_name
+
+
+def get_backup_cluster_ids() -> set:
+    """Return the set of StorPool backup-location IDs to accept.
+
+    In multicluster mode this is every backup location known from the config
+    (the global ``SP_BACKUP_CLUSTER_ID`` plus any per-subcluster override).
+    A backup at any configured location is fetchable regardless of which
+    subcluster a VM currently lives on -- the copy pulls from the location
+    recorded in the backup itself (see :func:`backup_location_name_for`) --
+    and the source VM may be deleted or migrated across subclusters, so
+    narrowing to its current subcluster could only hide valid backups or
+    fail outright when the VM no longer exists.
     """
     if is_multicluster():
-        if accept_all:
-            return all_configured_backup_cluster_ids()
-        cluster_name = get_vm_cluster_name(vm_uuid)
-        if cluster_name:
-            return {get_cluster_config(cluster_name)["SP_BACKUP_CLUSTER_ID"]}
         return all_configured_backup_cluster_ids()
     return {config["SP_BACKUP_CLUSTER_ID"]}
 
@@ -253,9 +285,7 @@ def read_config():
     config = config_all[""]
 
 
-def get_backup_list(
-        vm: str, accept_all_clusters: bool = False
-) -> Dict[int, Dict[str, Any]]:
+def get_backup_list(vm: str) -> Dict[int, Dict[str, Any]]:
     cmd = [
         'storpool_vcctl',
         'status',
@@ -284,9 +314,7 @@ def get_backup_list(
         ):
             logging.debug("backups found for VM %s", vm)
             history = bck["history"]
-            backup_cluster_ids = get_backup_cluster_ids(
-                vm, accept_all=accept_all_clusters
-            )
+            backup_cluster_ids = get_backup_cluster_ids()
             return {
                 entry["create_ts"]: entry
                 for entry in history
@@ -362,11 +390,19 @@ def snapshot_from_remote(
         snapshot_gid: str,
         cluster_name: Optional[str],
         cluster_settings: Dict[str, Any],
+        backup_location_id: Optional[str] = None,
 ) -> None:
-    """Pull one backup snapshot into the given subcluster (idempotent)."""
+    """Pull one backup snapshot into the given subcluster (idempotent).
+
+    ``backup_location_id`` is the backup entry's ``id.location``; when given,
+    the snapshot is pulled from the location the backup was written to (see
+    :func:`backup_location_name_for`).
+    """
     args = {
         "remoteId": snapshot_gid,
-        "remoteLocation": cluster_settings["SP_BACKUP_LOCATION_NAME"],
+        "remoteLocation": backup_location_name_for(
+            backup_location_id, cluster_settings
+        ),
         "template": cluster_settings["SP_LOCAL_TEMPLATE"],
     }
     try:
@@ -381,11 +417,13 @@ def copy_snapshots_from_remote(
         volume_list: List[Dict[str, Any]],
         cluster_name: Optional[str],
         cluster_settings: Dict[str, Any],
+        backup_location_id: Optional[str] = None,
 ) -> None:
     logging.debug("Copy snapshots to the local cluster")
     for vol in volume_list:
         snapshot_from_remote(
-            vol["sp_snapshot"].lstrip("~"), cluster_name, cluster_settings
+            vol["sp_snapshot"].lstrip("~"), cluster_name, cluster_settings,
+            backup_location_id
         )
 
 
@@ -465,7 +503,10 @@ def revert_vm(backup: Dict[str, Any]) -> None:
     logging.debug("VM %s is stopped", vm_uuid)
 
     detach_volumes(volume_list, cluster_name)
-    copy_snapshots_from_remote(volume_list, cluster_name, cluster_settings)
+    copy_snapshots_from_remote(
+        volume_list, cluster_name, cluster_settings,
+        backup["id"]["location"]
+    )
     revert_volumes(volume_list, cluster_name)
     delete_local_snapshots(volume_list, cluster_name)
 
@@ -493,6 +534,7 @@ def create_volume_and_attach(
 
     snapshot_name = snapshot_map[volume_uuid]
     snapshot_gid = snapshot_name.lstrip("~")
+    backup_location_id = backup["id"]["location"]
 
     # The server VM's subcluster is where we copy the snapshot to size the new
     # volume. In most deployments the new CloudStack volume lands on this same
@@ -505,7 +547,9 @@ def create_volume_and_attach(
     # copy the snapshot to the server's cluster (to read its size)
     #
     logging.debug("Copy snapshot %s to cluster %s", snapshot_gid, cluster_name)
-    snapshot_from_remote(snapshot_gid, cluster_name, cluster_settings)
+    snapshot_from_remote(
+        snapshot_gid, cluster_name, cluster_settings, backup_location_id
+    )
 
     snapshot_size = sp_api.snapshotDescribe(
         snapshot_name, **sp_cluster_kwargs(cluster_name)
@@ -583,7 +627,8 @@ def create_volume_and_attach(
         )
         volume_cluster_settings = get_cluster_config(volume_cluster_name)
         snapshot_from_remote(
-            snapshot_gid, volume_cluster_name, volume_cluster_settings
+            snapshot_gid, volume_cluster_name, volume_cluster_settings,
+            backup_location_id
         )
 
     #
@@ -792,7 +837,8 @@ def restore_vm(
 
     detach_volumes(volume_list, target_cluster_name)
     copy_snapshots_from_remote(
-        volume_list, target_cluster_name, target_cluster_settings
+        volume_list, target_cluster_name, target_cluster_settings,
+        backup["id"]["location"]
     )
     revert_volumes(volume_list, target_cluster_name, revert_size=True)
     delete_local_snapshots(volume_list, target_cluster_name)
@@ -884,6 +930,7 @@ def main():
 
     if args.command == "revert":
         backup_list = get_backup_list(args.vm_uuid)
+        check_backup_is_uuid_format(backup_list)
         try:
             backup = backup_list[args.backup_id]
         except KeyError:
@@ -895,6 +942,7 @@ def main():
 
     if args.command == "attach":
         backup_list = get_backup_list(args.vm_uuid)
+        check_backup_is_uuid_format(backup_list)
         try:
             backup = backup_list[args.backup_id]
         except KeyError:
@@ -905,10 +953,8 @@ def main():
         return 0
 
     if args.command == "restore":
-        # The source VM may be deleted/migrated or live on a different
-        # subcluster than where its backup was written, so accept backups
-        # from every configured backup location.
-        backup_list = get_backup_list(args.vm_uuid, accept_all_clusters=True)
+        backup_list = get_backup_list(args.vm_uuid)
+        check_backup_is_uuid_format(backup_list)
         try:
             backup = backup_list[args.backup_id]
         except KeyError:

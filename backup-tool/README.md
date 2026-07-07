@@ -221,6 +221,16 @@ without the ``~`` prefix, matching the StorPool ``clusterId``) override
 ``SP_BACKUP_CLUSTER_ID``, ``SP_BACKUP_LOCATION_NAME``, and ``SP_LOCAL_TEMPLATE``
 per subcluster.
 
+In multicluster mode backup discovery accepts backups from *every* configured
+backup location (the global ``SP_BACKUP_CLUSTER_ID`` plus the per-subcluster
+overrides), so ``list``, ``attach``, and ``restore`` keep working when the
+source VM has been deleted or migrated to another subcluster. When a backup is
+copied in for a revert or restore, the ``remoteLocation`` it is pulled from is
+resolved from the backup entry's own location (matched back to the config
+entry with that ``SP_BACKUP_CLUSTER_ID``), not from the target subcluster's
+settings, so cross-subcluster restores pull from the right place even when
+subclusters back up to different locations.
+
 When VolumeCare uses two subclusters of the same StorPool multicluster as
 primary and backup locations, enable ``use_cluster_id=1`` in VolumeCare on
 both clusters (see the StorPool VolumeCare documentation).
