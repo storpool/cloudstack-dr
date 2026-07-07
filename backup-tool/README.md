@@ -204,8 +204,17 @@ it is reliable for Stopped or freshly-provisioned replacement VMs. No
 
 Each StorPool operation is then forwarded to that subcluster using StorPool's
 ``RemoteCommand``, addressing the cluster by ID with the ``~<clusterID>`` form
-(e.g. ``RemoteCommand/~nmjc.b/...``). No registered StorPool cluster name is
-required.
+(e.g. ``RemoteCommand/~nmjc.b/...``), where it runs as a *local* operation on
+that subcluster. No registered StorPool cluster name is required.
+
+Internally the tool uses two StorPool API clients: a multicluster client only
+to *discover* which subcluster a volume resides on (the ``clusterId`` is
+reported only on ``MultiCluster/`` calls), and a non-multicluster client for
+the actual operations. The operations client is deliberately non-multicluster:
+a forwarded command (``RemoteCommand/~<id>/<Op>``) must run locally on the
+target subcluster and must NOT carry a ``MultiCluster/`` path segment --
+StorPool rejects ``RemoteCommand/~<id>/MultiCluster/<Op>`` with
+"request 'MultiCluster/<Op>' is not supported".
 
 Optional ``[cluster <clusterID>]`` sections (e.g. ``[cluster nmjc.b]``,
 without the ``~`` prefix, matching the StorPool ``clusterId``) override
