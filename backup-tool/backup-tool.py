@@ -18,14 +18,17 @@ import confget
 config = None  # Config is in /etc/storpool/backup-tool.conf
 cs_api = None
 sp_api = None
+sp_api_mc = None
 
 
 def get_apis():
-    global cs_api, sp_api
+    global cs_api, sp_api, sp_api_mc
     if cs_api is None:
         cs_api = cs.CloudStack(**cs.read_config())
     if sp_api is None:
         sp_api = spapi.Api.fromConfig()
+    if sp_api_mc is None:
+        sp_api_mc = spapi.Api.fromConfig(multiCluster=True)
 
 
 def read_config():
@@ -171,7 +174,7 @@ def revert_vm(backup: Dict[str, Any]) -> None:
             for vol in volume_list
         ],
     }
-    sp_api.volumesReassignWait(args)
+    sp_api_mc.volumesReassignWait(args)
 
     # copy snapshots to the local cluster
     logging.debug("Copy snapshots to the local cluster")
@@ -508,7 +511,7 @@ def restore_vm(
             for vol in volume_list
         ],
     }
-    sp_api.volumesReassignWait(args)
+    sp_api_mc.volumesReassignWait(args)
 
     # Copy snapshots to the local cluster
     logging.debug("Copy snapshots to the local cluster")
